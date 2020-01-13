@@ -1,0 +1,47 @@
+\documentclass[hidelinks]{article}
+\usepackage[margin=2cm]{geometry}
+ \usepackage{booktabs}
+   \usepackage{longtable}
+   \usepackage{array}
+   \usepackage{multirow}
+   \usepackage{wrapfig}
+   \usepackage{float}
+   \usepackage{colortbl}
+   \usepackage{pdflscape}
+   \usepackage{tabu}
+   \usepackage{threeparttable}
+   \usepackage{threeparttablex}
+   \usepackage[normalem]{ulem}
+   \usepackage[normalem]{ulem}
+   \usepackage[utf8]{inputenc}
+   \usepackage{makecell}
+   \usepackage{xcolor}
+   \usepackage{hyperref}
+  
+
+   
+\title{PARAJA}
+\author{Koray Ta\c{s}c{\i}lar}
+\begin{document}
+\maketitle
+
+\section*{Read files}
+<<loadpackages,error=FALSE,warning=FALSE,message=FALSE>>=
+library(tidyverse)
+library(readxl)
+datafile <- "Kopie von PARAJA_Export_20200107.xlsx"
+original <- datafile %>% 
+  excel_sheets() %>% 
+  set_names() %>% 
+  map(read_excel,path=datafile)
+fixnames<- original %>% 
+  map(~setNames(.x,tolower(str_replace_all(names(.x),"[^[:alnum:]]",""))))
+
+patients <- fixnames$patients %>% select(1,5,6,7,10)
+visits <- fixnames$visits
+treatments <- fixnames$treatments %>% select(1,)
+@
+
+
+
+\end{document}
