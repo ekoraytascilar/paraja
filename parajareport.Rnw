@@ -20,7 +20,7 @@
   
 
    
-\title{PARAJA}
+\title{PARAJA analyses}
 \author{Koray Ta\c{s}c{\i}lar}
 \begin{document}
 \maketitle
@@ -29,7 +29,7 @@
 <<loadpackages,error=FALSE,warning=FALSE,message=FALSE>>=
 library(tidyverse)
 library(readxl)
-datafile <- "Kopie von PARAJA_Export_20200107.xlsx"
+datafile <- "paraja_corrected.xlsx"
 original <- datafile %>% 
   excel_sheets() %>% 
   set_names() %>% 
@@ -37,9 +37,12 @@ original <- datafile %>%
 fixnames<- original %>% 
   map(~setNames(.x,tolower(str_replace_all(names(.x),"[^[:alnum:]]",""))))
 
-patients <- fixnames$patients %>% select(1,5,6,7,10)
-visits <- fixnames$visits
-treatments <- fixnames$treatments %>% select(1,)
+attach(fixnames)
+@
+
+\
+<<>>=
+
 @
 
 
