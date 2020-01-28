@@ -1,25 +1,24 @@
 \documentclass[hidelinks]{article}
 \usepackage[margin=2cm]{geometry}
- \usepackage{booktabs}
-   \usepackage{longtable}
-   \usepackage{array}
-   \usepackage{multirow}
-   \usepackage{wrapfig}
-   \usepackage{float}
-   \usepackage{colortbl}
-   \usepackage{pdflscape}
-   \usepackage{tabu}
-   \usepackage{threeparttable}
-   \usepackage{threeparttablex}
-   \usepackage[normalem]{ulem}
-   \usepackage[normalem]{ulem}
-   \usepackage[utf8]{inputenc}
-   \usepackage{makecell}
-   \usepackage{xcolor}
-   \usepackage{hyperref}
-  
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{wrapfig}
+\usepackage{float}
+\usepackage{colortbl}
+\usepackage{pdflscape}
+\usepackage{tabu}
+\usepackage{threeparttablex}
+\usepackage[normalem]{ulem}
+\usepackage[normalem]{ulem}
+\usepackage[utf8]{inputenc}
+\usepackage{makecell}
+\usepackage{xcolor}
+\usepackage{hyperref}
 
-   
+
+
 \title{PARAJA analyses}
 \author{Koray Ta\c{s}c{\i}lar}
 \begin{document}
@@ -27,9 +26,23 @@
 
 \section*{Read files}
 <<loadpackages,error=FALSE,warning=FALSE,message=FALSE>>=
-library(tidyverse)
+
 library(readxl)
-datafile <- "paraja_corrected.xlsx"
+library(ggstance)
+library(survival)
+library(survminer)
+library(tidyverse)
+library(tables)
+library(lubridate)
+library(kableExtra)
+library(lme4)
+library(lmerTest)
+library(broom)
+library(broom.mixed)
+library(broomExtra)
+library(splines)
+datafile <- "paraja_corrected_visitdeleted.xlsx"
+#One visit date was in February 2020 and contained no clinical data, it was deleted.
 original <- datafile %>% 
   excel_sheets() %>% 
   set_names() %>% 
@@ -37,12 +50,488 @@ original <- datafile %>%
 fixnames<- original %>% 
   map(~setNames(.x,tolower(str_replace_all(names(.x),"[^[:alnum:]]",""))))
 
+rm(datafile)
+
 attach(fixnames)
 @
 
-\
-<<>>=
+\section{Set start-end dates}
+<<startenddates,fig.cap="Visit numbers by visit times in weeks">>=
+startenddates <-  treatments %>% 
+  select(parajapatientennr,medikation,start,ende) %>% 
+  filter(medikation=="Baricitinib") %>%
+  group_by(parajapatientennr) %>% 
+  mutate(dosechange=ifelse(n()>1,"Yes","No"),
+         baristart=first(start,order_by = start),
+         bariend=if(any(is.na(ende))){NA}else{last(ende,order_by = ende)}) %>% 
+  select(parajapatientennr,baristart,bariend,dosechange) %>% 
+  distinct() %>% 
+  left_join( visits %>% 
+               select(parajapatientennr,visitennr,datumvisite)) %>% 
+  group_by(parajapatientennr) %>% 
+  mutate(timeafterbari=as.numeric(difftime(datumvisite,baristart,units = "week")),
+         timeafterbaristop=as.numeric(difftime(datumvisite,bariend,units = "week"))) %>% 
+  filter(((timeafterbari>=0&is.na(timeafterbaristop))|
+            (timeafterbari>=0&timeafterbaristop<=0&!is.na(timeafterbaristop)))) %>% 
+  arrange(parajapatientennr,visitennr) %>% ungroup()
 
+theme_set(theme_bw())
+
+startenddates%>% 
+  ggplot(aes(timeafterbari,visitennr,group=parajapatientennr))+
+  geom_line(position = position_dodgev(height = 1.2))+
+  labs(x="Time after baricitinib (Weeks)",y="Visit number")+
+  scale_y_continuous(breaks=function(x) c(0:max(x,na.rm = T)), 
+                     labels = function(x) c(0:max(x,na.rm = T)))
+
+@
+
+\section{Plot outcome course over time}  
+
+<<das28courseafterbari,fig.cap="Course of various outcomes under baricitinib treatment",fig.asp=1.2>>=
+outcomes <- startenddates %>% 
+  left_join(visits %>% select(parajapatientennr,visitennr, tjc78,
+                              sjc76,das28crpscore,das28esrscore, haqscore,
+                              raidscore,facitscore,
+                              vasschmerzpatient,vaskrankheitsaktivitätpatient,
+                              vaskrankheitsaktivitätarzt,
+                              morgensteifigkeit,crpmgl,esrmmin1stunde,
+                              cholesterinmgdl,hdlcholesterinmgdl,
+                              ldlcholesterinmgdl),
+            by=c("parajapatientennr","visitennr")) %>% 
+  pivot_longer(cols = tjc78:ldlcholesterinmgdl,names_to = "measurement")
+
+outcomelabels <- data.frame(
+  measurement=outcomes$measurement %>% unique(),
+  measurementlabel=c(
+    "TJC (78)",
+    "SJC (76)",
+    "DAS28 CRP",
+    "DAS28 ESR",
+    "HAQ",
+    "RAID",
+    "FACIT",
+    "VAS pain (mm)",
+    "Patient global",
+    "Physician global",
+    "Morning stiffness (min)",
+    "CRP (mg/L)",
+    "ESR (mm/h)",
+    "Total cholesterol (mg/dl)",
+    "HDL (mg/dl",
+    "LDL (mg/dl"
+  ),
+  labelorder=c(1:16), 
+  stringsAsFactors = F
+)
+
+outcomes %>% 
+  mutate(value=case_when(
+    measurement=="esrmmin1stunde"~log(value),
+    measurement=="tjc78"~log(value+1),
+    measurement=="sjc76"~log(value+1),
+    measurement=="crpmgl"~log(value),
+    measurement=="morgensteifigkeit"~log(value+1),
+    TRUE~value
+  )) %>% 
+  mutate(logged=measurement %in% c("esrmmin1stunde","tjc78","crpmgl","morgensteifigkeit")) %>% 
+  left_join(outcomelabels,by="measurement") %>% 
+  mutate(measurementlabel=fct_reorder(measurementlabel,labelorder)) %>% 
+  group_by(measurement) %>% 
+  filter(timeafterbari<=52) %>% 
+  ggplot(aes(timeafterbari,value))+
+  geom_line(aes(group=parajapatientennr),alpha=0.1)+
+  #geom_point(alpha=0.2)+
+  geom_smooth()+
+  facet_wrap(.~measurementlabel,scales = "free",ncol = 4)+
+  theme(strip.background = element_blank())+
+  labs(x="Time after starting baricitinib (Weeks)",y=NULL,caption = "* log transformed")
+
+@
+
+\subsection{Fit mixed model to plot change in time}
+<<modelchange,fig.cap="Change over time in disease activity, patient reported outcomes and laboratory values estimated by regressing measurements over time using natural splines.>>=
+mylog1 <- make.tran("genlog",param = 1)
+mylog <- make.tran("genlog",param = 0)
+mylog01 <- make.tran("genlog",param = 0.1)
+outcomes %>% 
+#  mutate(value=case_when(
+#    measurement=="esrmmin1stunde"~log(value),
+#    measurement=="tjc78"~log(value+1),
+#    measurement=="sjc76"~log(value+1),
+#    measurement=="crpmgl"~log(value+0.1),
+#    measurement=="morgensteifigkeit"~log(value+1),
+#    TRUE~value
+#  )) %>% 
+#  mutate(logged=measurement %in% c("esrmmin1stunde","tjc78","crpmgl","morgensteifigkeit")) %>% 
+#  left_join(outcomelabels,by="measurement") %>% 
+#  mutate(measurementlabel=fct_reorder(measurementlabel,labelorder)) %>% 
+  filter(timeafterbari<=52,!is.na(value)) %>% 
+  group_by(measurement) %>% 
+  do(bind_rows( 
+    if (.$measurement%in%c("tjc78","sjc76","morgensteifigkeit")) {
+      with(mylog1,lme4::lmer(linkfun(value)~ns(timeafterbari,3)+(1|parajapatientennr),data=.)) %>%
+       ref_grid(.,at = list(timeafterbari=c(0,4,12,24,36,52))) %>%  
+       emmip(formula = ~timeafterbari,plotit = F,
+             CIs = T,cov.reduce=FALSE,type = "response")
+    }else if (.$measurement=="esrmin1stunde") {
+     with (mylog, lme4::lmer(linkfun(value) ~ns(timeafterbari,3)+(1|parajapatientennr),data=.)) %>%
+       ref_grid(.,at = list(timeafterbari=c(0,4,12,24,36,52))) %>%  
+       emmip(formula = ~timeafterbari,plotit = F,
+             CIs = T,cov.reduce=FALSE,type = "response")
+    }else if (.$measurement=="crpmgl") {
+      with(mylog01, lme4::lmer(linkfun(value)~ns(timeafterbari,3)+(1|parajapatientennr),data=.)) %>%
+       ref_grid(.,at = list(timeafterbari=c(0,4,12,24,36,52))) %>%  
+       emmip(formula = ~timeafterbari,plotit = F,
+             CIs = T,cov.reduce=FALSE,type = "response")
+    }else{
+    lme4::lmer(value~ns(timeafterbari,3)+(1|parajapatientennr),data=.) %>%
+       ref_grid(.,at = list(timeafterbari=c(0,4,12,24,36,52))) %>%  
+       emmip(formula = ~timeafterbari,plotit = F,
+             CIs = T,cov.reduce=FALSE,type = "response")}
+
+  )) %>% 
+  ungroup() %>% 
+  left_join(outcomelabels,by="measurement") %>%
+  mutate(measurementlabel=fct_reorder(measurementlabel,labelorder),
+         xvar=as.numeric(as.character(xvar))) %>% 
+  ggplot(aes(xvar,yvar))+
+  geom_point()+geom_errorbar(aes(ymin=LCL,ymax=UCL),width=1)+
+  geom_line()+
+  labs(x="Time (Weeks)",y=NULL)+
+  facet_wrap(.~measurementlabel,scales = "free")+
+  scale_x_continuous(breaks = c(0,4,12,24,36,52))+
+  theme_bw()+
+  theme(strip.background = element_blank())
+
+@
+
+
+\section{Plot probabilities of low disease activity and remission over time}
+\subsection*{Prepare survival data for DAS-28 low disease activity and remission}
+The following code finds the first time point in follow-up of patients where DAS-28 was in the range of low disease activity or remission. This is done separately for ESR and CRP based score and in case one of them is missing also in a third category as whatever das exists (i.e if a patient is in remission with DAS-28 ESR and the DAS-28 CRP is unknown, the evaluation is only done by DAS-28 ESR and vice versa as a separate evaluation on its own.)
+<<survivalplot,error=FALSE,warning=FALSE>>=
+
+#prepare survival data
+das28survivaldata <-  outcomes %>%
+  select(parajapatientennr, timeafterbari, timeafterbaristop,measurement,value) %>% 
+  distinct() %>% 
+  filter(measurement%in%c("das28crpscore","das28esrscore")) %>% 
+  mutate(id=row_number()) %>% 
+  pivot_wider(names_from = measurement,values_from = value) %>% 
+  group_by(parajapatientennr,timeafterbari) %>% 
+  
+  #Bring DAS28-ESR and CRP on the same row.
+  mutate(das28crpscore=ifelse(is.na(das28crpscore),                  
+                              mean(das28crpscore,na.rm = T),                  
+                              das28crpscore),                  
+         das28esrscore=ifelse(is.na(das28esrscore),                  
+                              mean(das28esrscore,na.rm = T),                  
+                              das28esrscore)) %>%                   
+  select(-id) %>% distinct() %>%
+  mutate(lda_dascrp=das28crpscore<=3.2,
+         remission_dascrp=das28crpscore<1.9,
+         lda_dasesr=das28esrscore<=3.2,
+         remission_dasesr=das28esrscore<2.2) %>% 
+  mutate(lda_das=lda_dascrp|lda_dasesr,
+         remission_das=remission_dascrp|remission_dasesr) %>% 
+  rowwise() %>% 
+  # This assigns false to remission or LDA status when it is 
+  # false only in either one of das28 esr or CRP (and the other is missing)
+  mutate(lda_das=ifelse(is.na(lda_das),
+                        !any(!c(lda_dascrp,lda_dasesr)),
+                        lda_das),
+         remission_das=ifelse(is.na(remission_das),
+                              !any(!c(remission_dascrp,remission_dasesr)),
+                              remission_das)) %>% ungroup() %>% 
+  group_by(parajapatientennr) %>% 
+  #Get censortimes
+  mutate(timetolda=min(timeafterbari[lda_das],na.rm=T),
+         timetoremission=min(timeafterbari[remission_das],na.rm = T),
+         timetolda_crp=min(timeafterbari[lda_dascrp],na.rm = T),
+         timetolda_esr=min(timeafterbari[lda_dasesr],na.rm = T),
+         timetoremission_crp=min(timeafterbari[remission_dascrp],na.rm = T),
+         timetoremission_esr=min(timeafterbari[remission_dasesr],na.rm = T),
+         totalbaritime=max(timeafterbari,(-timeafterbaristop),na.rm = T)) %>% 
+  mutate_if(function(x) any(is.infinite(x)),
+            function(x) ifelse(is.infinite(x),NA,x)) %>% 
+  # Get rid of timepoint details and finalize
+  mutate(lda_das=any(lda_das,na.rm = T),
+         lda_dascrp=any(lda_dascrp,na.rm = T),
+         lda_dasesr=any(lda_dasesr,na.rm = T),
+         remission_das=any(remission_das,na.rm = T),
+         remission_dascrp=any(remission_dascrp,na.rm = T),
+         remission_dasesr=any(remission_dasesr,na.rm = T)) %>% 
+  ungroup() %>% 
+  mutate_if(function(x) any(is.infinite(x)),
+            function(x) ifelse(is.infinite(x),NA,x)) %>% 
+  select(-c(2:5)) %>% distinct() %>% 
+  mutate_at(vars(contains("timeto")),~ifelse(is.na(.x),totalbaritime,.x))
+
+#prepare data for boolean remission
+
+das28survivaldata<- startenddates %>% 
+  left_join(visits %>% select(parajapatientennr,visitennr, tjc78,
+                              sjc76,vaskrankheitsaktivitätpatient,
+                              crpmgl),
+            by=c("parajapatientennr","visitennr")) %>% 
+  mutate(boolean=tjc78<=1&sjc76<=1&vaskrankheitsaktivitätpatient<=10&crpmgl<=10) %>%
+  group_by(parajapatientennr) %>% 
+  mutate(timetoboolean=min(timeafterbari[boolean],na.rm = T),
+         totalbaritime=max(timeafterbari,-timeafterbaristop ,na.rm = T)) %>% 
+  mutate(boolean=any(boolean,na.rm = T)) %>% select(1,13:15) %>% 
+  distinct() %>%  
+  mutate(timetoboolean=ifelse(is.infinite(timetoboolean)|is.na(timetoboolean),totalbaritime,timetoboolean)) %>% 
+  select(-4) %>% 
+  left_join(das28survivaldata,by="parajapatientennr")
+
+das28survivaldata <- startenddates %>% 
+  group_by(parajapatientennr) %>% 
+  mutate(stoppedbari=!is.na(bariend),
+         t=max(timeafterbari,-timeafterbaristop,na.rm = T)) %>% 
+  select(parajapatientennr,stoppedbari,t) %>% distinct() %>% 
+  left_join(das28survivaldata, by="parajapatientennr")
+
+
+@
+
+\subsection*{Prepare survival objects and plot}
+The total observation period started on the earliest and latest dates of baricitiinib treatment initiation,namely 
+<<firstdate,results='asis',echo=FALSE>>= 
+mindate <- paste0(min(startenddates$baristart,na.rm=T))
+maxdate <- paste0(max(startenddates$baristart,na.rm=T))
+paste(mindate,"and",maxdate) %>% cat()
+@ 
+\noindent up to the latest visit day of
+<<lastdate,results='asis',echo=FALSE>>=
+maxdate <- paste0(max(startenddates$datumvisite))
+cat(maxdate)
+@
+\noindent (yyyy/mm/dd)
+
+\section {Compile possible covariates/subgroups for drug survival and remission}
+<<subgroupsofdasremission>>=
+#bDMARD naive
+totalfollowup <- visits %>% group_by(parajapatientennr) %>% 
+  mutate(firstvisit=min(datumvisite,na.rm = T),lastvisit=max(datumvisite,na.rm = T)) %>% 
+  ungroup() %>% 
+  mutate(fuinterval=interval(firstvisit,lastvisit)) %>%
+  select(parajapatientennr,firstvisit,lastvisit,fuinterval) %>% 
+  distinct()
+
+
+
+das28survivaldata <- treatments %>% select(parajapatientennr,medclass,medikation,start,ende) %>%
+  left_join(totalfollowup,by="parajapatientennr") %>%
+mutate(ende=case_when(
+  is.na(ende)~lastvisit,
+  TRUE~ende
+  # Edit start end dates to discriminate between previous treatments and concomittant treatments 
+),start= case_when(
+  is.na(start)&ende<=firstvisit~ende-dyears(1),
+  is.na(start)&ende>firstvisit~firstvisit,
+  is.na(start)&is.na(ende)~firstvisit,
+  TRUE~start
+)) %>%
+  mutate(txinterval=interval(start,ende)) %>% 
+  left_join(x=.,
+            y=({.} %>% 
+                 filter(medikation=="Baricitinib") %>%
+                 select(parajapatientennr,
+                        barinterval=txinterval)),
+            by="parajapatientennr" )%>% 
+  group_by(parajapatientennr,barinterval) %>% 
+  mutate(concomittant=int_overlaps(txinterval,
+                                   barinterval)&
+           medclass%in%(c("csDMARD","Corticosteroid")),
+         previous=int_start(txinterval)<int_start(barinterval)) %>% 
+  mutate(npreviousdmard=n_distinct(medikation[medclass=="csDMARD"&previous]),
+         npreviousbtsdmard=n_distinct(medikation[medikation!="Baricitinib"&
+                                                   medclass%in%c("bDMARD","tsDMARD")&
+                                                   previous]),
+         nconcomittantdmard=n_distinct(medikation[medclass=="csDMARD"&
+                                                    concomittant]),
+         nconcomittantsteroid=n_distinct(medikation[medclass=="Corticosteroid"&
+                                                      concomittant])) %>% 
+  ungroup() %>% 
+  select(1:3,contains("concomittant"),contains("previous")) %>% distinct() %>% 
+  {treatmenthistory<<-.} %>% 
+  select(-c(2:4,7)) %>% distinct() %>% 
+  
+  right_join(das28survivaldata,by="parajapatientennr")
+
+treatmenthistory %>% 
+  filter(concomittant) %>% 
+  select(medclass,parajapatientennr,medikation) %>% 
+  distinct() %>% 
+  mutate(number=n_distinct(parajapatientennr)) %>% 
+  group_by(medikation) %>% 
+  
+  mutate(npercent=unique(paste(n_distinct(parajapatientennr),
+                               "(",
+                               format(
+                                 round(
+                                   (n()/number)*100,1
+                                 ),
+                                 nsmall=1),
+                               ")")),txnumber=n_distinct(parajapatientennr)
+  ) %>% 
+  arrange(fct_reorder(medclass,txnumber,.desc = T),desc(txnumber)) %>% 
+  select(medclass,medikation,npercent) %>% 
+  distinct() %>% 
+  
+  kable(row.names = F,
+        caption ="Treatments used concomittantly with baricitinib", 
+        col.names = c("Treatment class", "Treatment","n(%)"),
+        booktabs=T,
+        align = c("l","l","c")) %>% 
+  kable_styling() %>% 
+  collapse_rows(columns = 1,valign = "top",latex_hline = "major")
+
+treatmenthistory %>% 
+  filter(previous,!is.na(medclass),medikation!="Baricitinib") %>% 
+  select(parajapatientennr,medikation,medclass) %>% 
+  distinct() %>% 
+  mutate(number=n_distinct(parajapatientennr)) %>% 
+  group_by(medikation) %>% 
+  
+  mutate(npercent=unique(paste(n_distinct(parajapatientennr),
+                               "(",
+                               format(
+                                 round(
+                                   (n()/number)*100,1
+                                 ),
+                                 nsmall=1),
+                               ")")),txnumber=n_distinct(parajapatientennr)
+  ) %>% 
+  arrange(fct_reorder(medclass,txnumber,.desc = T),desc(txnumber)) %>% 
+  select(medclass,medikation,npercent) %>% 
+  distinct() %>% 
+  
+  kable(row.names = F,
+        caption ="Treatments used up to starting baricitinib", 
+        col.names = c("Treatment class", "Treatment","n(%)"),
+        booktabs=T,
+        align = c("l","l","c")) %>% 
+  kable_styling() %>% 
+  collapse_rows(columns = 1,valign = "top",latex_hline = "major")
+
+
+
+@
+
+\subsection{Draw separate curves for time to first LDA and remission using DAS-28 and ESR separately}
+<<plotcurvesfordasstatus,fig.cap="Cumulative probabilities of attaining LDA and remission status over 1-year defined by DAS-28 ESR and CRP, the cutoff for remission was 1.9 for DAS-28 CRP and 2.2 for DAS-28 ESR">>=
+#survivalobjects
+survobj_lda_dascrp <- with(das28survivaldata, Surv(timetolda_crp,lda_dascrp))
+survobj_lda_dasesr <- with(das28survivaldata, Surv(timetolda_esr,lda_dasesr))
+survobj_remission_dascrp <- with(das28survivaldata, Surv(timetoremission_crp,remission_dascrp))
+survobj_remission_dasesr <- with(das28survivaldata, Surv(timetoremission_esr,remission_dasesr))
+survobj_remission_boolean <- with(das28survivaldata, Surv(timetoboolean,boolean))
+
+comparefits <- list(lda_dascrp=survfit(survobj_lda_dascrp~1),
+                    lda_dasesr=survfit(survobj_lda_dasesr~1),
+                    remission_dasesr=survfit(survobj_remission_dasesr~1),
+                    remission_dascrp=survfit(survobj_remission_dascrp~1))
+
+survobj_lda_das <- with(das28survivaldata, Surv(timetolda,lda_das))
+survobj_remission_das <- with(das28survivaldata, Surv(timetoremission,remission_das))
+
+survobj_barisurvival <- with(das28survivaldata,Surv(t,stoppedbari))
+
+
+comparefitsanydasandboolean <- list(lda_das=survfit(survobj_lda_das~1),
+                                    remission_das=survfit(survobj_remission_das~1),
+                                    remission_boolean=survfit(survobj_remission_boolean~1))
+
+ggsurvplot(comparefits,data = das28survivaldata,
+           combine = T,
+           fun = "event",
+           cumevents = T,
+           xlim=c(0,52),
+           break.time.by=4)
+
+
+@
+\subsection{Merge DAS-28 ESR and CRP, to plot combined time to first remission, including Boolean remission.}
+<<overallldaremissionplot,fig.cap="Cumulative probabilities of attaining LDA and remission status over 1 year defined by any DAS-28 (CRP or ESR) or Boolean criteria; the cutoff for remission was 1.9 for DAS-28 CRP and 2.2 for DAS-28 ESR",fig.asp=1.2>>=
+
+ldaremissionplot <- ggsurvplot(comparefitsanydasandboolean,data = das28survivaldata,
+                               combine = T,
+                               fun = "event",
+                               risk.table = "nrisk_cumcensor",
+                               cumevents = T,
+                               xlim=c(0,52),
+                               break.time.by=4,
+                               legend.labs=c("LDA-DAS","Remission-DAS","Remission-Boolean"),
+                               legend.title="",
+                               xlab="Time(Weeks)",
+                               tables.y.text.col=FALSE,
+                               tables.height = 0.18,
+                               linetype = c("solid","dashed","solid")
+)
+ldaremissionplot$plot <-ldaremissionplot$plot+ scale_color_grey()
+ldaremissionplot
+@
+
+
+<<barisurvival,fig.cap="Drug survival for baricitinib in the first year after treatment initiation.">>=
+barisurvival <- ggsurvplot(survfit(survobj_barisurvival~1),
+                           conf.int = T,
+                           risk.table = "nrisk_cumevents",
+                           data = das28survivaldata,
+                           ggtheme = theme_bw(base_size = 16),
+                           tables.theme = theme_survminer(),
+                           xlim=c(0,53),
+                           tables.y.text.col=FALSE,
+                           legend.labs="",
+                           legend.title="",
+                           xlab="Time(Weeks)",
+                           break.time.by=6)
+barisurvival$plot <- barisurvival$plot+
+  theme(legend.position = "none",
+        plot.margin = unit(c(1,1,0,0),"cm"))
+barisurvival$table <- barisurvival$table+theme(plot.margin =unit(c(0.5,1,0,0),"cm"))
+barisurvival
+@
+
+<<dmardnaive,fig.cap="Baricitinib survival in biologic or targeted synthetic DMARD (b-tsDMARD) naive versus b-tsDMARD IR patients">>=
+barisurvivalbyprevious<- ggsurvplot(survfit(survobj_barisurvival~npreviousbtsdmard<1,
+                                            data = das28survivaldata),
+                                    pval = T,
+                                    ,risk.table = "nrisk_cumevents",
+                                    xlim=c(0,53),
+                                    break.time.by=6,
+                                    legend.title="",
+                                    tables.y.text.col=FALSE,
+                                    xlab="Time(Weeks)",
+                                    ggtheme = theme_bw(base_size = 16),
+                                    tables.theme = theme_survminer(),
+                                    legend.labs=c("b-tsDMARD-IR","b-tsDMARD naive"),
+                                    linetype = c("solid","dashed"))
+
+barisurvivalbyprevious$plot <- barisurvivalbyprevious$plot+scale_color_grey()
+barisurvivalbyprevious
+@
+
+\subsection{LDA/Remission and baricitinib survival by predictors}
+<<dasremissionbytsdmard,fig.cap="Cumulative probability of DAS-remission by previous use of b-tsDMARDs">>=
+
+dasremissionbyprevious <- ggsurvplot(survfit(survobj_remission_das~npreviousbtsdmard<1,
+           data = das28survivaldata),fun = "event",
+                                               pval = T,
+                                    ,risk.table = "nrisk_cumevents",
+                                    xlim=c(0,53),
+                                    break.time.by=6,
+                                    legend.title="",
+                                    tables.y.text.col=FALSE,
+                                    xlab="Time(Weeks)",
+                                    ggtheme = theme_bw(base_size = 16),
+                                    tables.theme = theme_survminer(),
+                                    legend.labs=c("b-tsDMARD-IR","b-tsDMARD naive"),
+                                    linetype = c("dotdash","solid"))
+dasremissionbyprevious$plot <- dasremissionbyprevious$plot+scale_color_grey()
+dasremissionbyprevious
 @
 
 
